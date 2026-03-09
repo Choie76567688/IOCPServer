@@ -4,9 +4,11 @@
 #pragma pack(push, 1)
 
 enum PacketID {
-    ID_C_LOGIN = 1,       // 클라이언트 -> 서버 (로그인 요청)
-    ID_S_LOGIN_RESULT = 2, // 서버 -> 클라이언트 (로그인 결과)
-    ID_C_MOVE = 3          // 이동 (기존 번호 수정 가능)
+    ID_C_LOGIN = 1,
+    ID_S_LOGIN_RESULT = 2,
+    ID_C_MOVE = 3,           // 클라이언트 -> 서버 (이동 보고)
+    ID_S_MOVE_BROADCAST = 4, // 서버 -> 클라이언트 (다른 유저 이동 알림)
+    ID_S_ASSIGN_ROLE = 5     // 서버 -> 클라이언트 (역할 부여: 0추격자, 1도망자)
 };
 
 struct PacketHeader {
@@ -14,16 +16,27 @@ struct PacketHeader {
     uint16_t id;
 };
 
-// 클라이언트가 서버로 보내는 데이터
 struct C_LOGIN {
     PacketHeader header;
-    char playerID[32]; // 아이디 (최대 32자)
+    char playerID[32];
 };
 
-// 서버가 클라이언트로 보내는 응답
 struct S_LOGIN_RESULT {
     PacketHeader header;
-    bool bSuccess;     // 로그인 성공 여부
+    bool bSuccess;
+    int32_t playerIndex; // 서버가 부여한 고유 번호
+};
+
+struct P_MOVE_DATA {
+    PacketHeader header;
+    int32_t playerIndex;
+    float x, y, z;
+    float pitch, yaw, roll;
+};
+
+struct S_ASSIGN_ROLE {
+    PacketHeader header;
+    int32_t role; // 0: 추격자, 1: 도망자
 };
 
 #pragma pack(pop)
