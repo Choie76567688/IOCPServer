@@ -1,1 +1,146 @@
-## Shared.h는 서버 클라 공통으로 들어가야하는 코드##
+Shared.h는 서버 클라 공통으로 들어가야하는 코드
+UI(위젯 블루프린트)에서의 연결 방법
+로그인 위젯에서 Get Game Instance -> Cast to MyGameInstance를 합니다.
+
+ConnectToServer를 먼저 호출합니다 (보통 위젯 생성 시 1번).
+
+로그인 버튼 클릭 시 SendLogin 함수를 호출하고 입력값(FString)을 넘겨줍니다.
+
+언리얼 프로젝트의 Build.cs 파일에 반드시 "Sockets", "Networking" 모듈이 추가되어 있어야 합니다!
+
+MyGameInstance (.h/.cpp): 언리얼 에디터의 **[새 C++ 클래스 추가] -> [Game Instance]**를 상속받아 생성한 뒤 코드를 작성하세요.
+
+FMyReceiverWorker는 별도의 스레드에서 작동합니다.
+서버에서 데이터를 받았을 때 캐릭터를 소환하거나 UI를 바꾸는 작업은 반드시 AsyncTask를 통해 Game Thread로 넘겨야 게임이 튕기지 않습니다.
+
+
+
+<클라에 포함되야하는 코드>
+***MyGameInstance.h***
+#pragma once
+#include "CoreMinimal.h"
+#include "Engine/GameInstance.h"
+#include "Shared.h"
+#include "MyGameInstance.generated.h"
+
+UCLASS()
+class YOURGAME_API UMyGameInstance : public UGameInstance {
+    GENERATED_BODY()
+
+public:
+    // 블루프린트에서 부를 함수들
+    UFUNCTION(BlueprintCallable)
+    void ConnectToServer();
+
+    UFUNCTION(BlueprintCallable)
+    void SendMovePacket(FVector Location, FRotator Rotation);
+
+    // 다른 플레이어 위치 업데이트 (수신 스레드에서 호출)
+    void UpdateRemotePlayer(int32 P_Index, FVector Loc, FRotator Rot);
+    
+    // 역할 할당 시 호출
+    void SetMyRole(int32 Role);
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 MyPlayerIndex = -1;
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 MyRole = -1; // 0: 추격자, 1: 도망자
+
+private:
+    FSocket* Socket;
+    TMap<int32, AActor*> RemotePlayers;
+
+    UPROPERTY(EditAnywhere)
+    TSubclassOf<AActor> PlayerBlueprintClass; // 생성할 캐릭터 블루프린트
+};
+
+***MyGameInstance.cpp***
+#include "MyGameInstance.h"
+#include "Sockets.h"
+#include "Networking.h"
+
+void UMyGameInstance::UpdateRemotePlayer(int32 P_Index, FVector Loc, FRotator Rot) {
+    if (AActor** FoundActor = RemotePlayers.Find(P_Index)) {
+        if (*FoundActor) {
+            (*FoundActor)->SetActorLocation(Loc);
+            (*FoundActor)->SetActorRotation(Rot);
+        }
+    } else {
+        // 게임 스레드에서 액터를 생성해야 함
+        AsyncTask(ENamedThreads::GameThread, [this, P_Index, Loc, Rot]() {
+            FActorSpawnParameters Params;
+            AActor* NewActor = GetWorld()->SpawnActor<AActor>(PlayerBlueprintClass, Loc, Rot, Params);
+            if (NewActor) RemotePlayers.Add(P_Index, NewActor);
+        });
+    }
+}
+
+void UMyGameInstance::SendMovePacket(FVector Location, FRotator Rotation) {
+    if (!Socket) return;
+
+    P_MOVE_DATA Pkt;
+    Pkt.header.size = sizeof(P_MOVE_DATA);
+    Pkt.header.id = ID_C_MOVE;
+    Pkt.playerIndex = MyPlayerIndex;
+    Pkt.x = Location.X; Pkt.y = Location.Y; Pkt.z = Location.Z;
+    Pkt.pitch = Rotation.Pitch; Pkt.yaw = Rotation.Yaw; Pkt.roll = Rotation.Roll;
+
+    int32 Sent = 0;
+    Socket->Send((uint8*)&Pkt, Pkt.header.size, Sent);
+}
+
+void UMyGameInstance::SetMyRole(int32 Role) {
+    MyRole = Role;
+    UE_LOG(LogTemp, Warning, TEXT("내 역할이 정해졌습니다: %s"), (Role == 0 ? TEXT("추격자") : TEXT("도망자")));
+    // 여기서 UI에 알림을 띄우거나 캐릭터 외형을 바꾸는 로직 추가
+}
+***MyReceiverWorker.h***
+#pragma once
+#include "CoreMinimal.h"
+#include "HAL/Runnable.h"
+
+class FMyReceiverWorker : public FRunnable {
+public:
+    FMyReceiverWorker(class FSocket* InSocket, class UMyGameInstance* InGI);
+    virtual uint32 Run() override;
+    virtual void Stop() override { bRunning = false; }
+
+private:
+    class FSocket* ClientSocket;
+    class UMyGameInstance* GameInstance;
+    bool bRunning = true;
+};
+***MyReceiverWorker.cpp***
+#include "MyReceiverWorker.h"
+#include "Sockets.h"
+#include "Shared.h"
+#include "MyGameInstance.h"
+#include "Async/Async.h"
+
+FMyReceiverWorker::FMyReceiverWorker(FSocket* InSocket, UMyGameInstance* InGI) 
+    : ClientSocket(InSocket), GameInstance(InGI) {}
+
+uint32 FMyReceiverWorker::Run() {
+    uint8 Buffer[1024];
+    while (bRunning) {
+        int32 BytesRead = 0;
+        if (ClientSocket && ClientSocket->Recv(Buffer, sizeof(Buffer), BytesRead)) {
+            if (BytesRead > 0) {
+                PacketHeader* Header = (PacketHeader*)Buffer;
+                // 로그인 결과 패킷 처리
+                if (Header->id == ID_S_LOGIN_RESULT) {
+                    S_LOGIN_RESULT* Res = (S_LOGIN_RESULT*)Buffer;
+                    bool bSuccess = Res->bSuccess;
+                    
+                    // 게임 스레드에서 UI 업데이트나 레벨 이동 처리
+                    AsyncTask(ENamedThreads::GameThread, [this, bSuccess]() {
+                        GameInstance->OnLoginResult(bSuccess);
+                    });
+                }
+            }
+        }
+        FPlatformProcess::Sleep(0.01f);
+    }
+    return 0;
+}
